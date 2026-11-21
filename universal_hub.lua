@@ -70,6 +70,45 @@ local cfg = {
 	noclip = false,
 	infjump = false,
 	antiafk = false,
+	-- rage (Prison Life)
+	rgOn = false,
+	rgActivate = "Always", -- Always | Hold
+	rgHold = { kind = "Mouse", name = "MouseButton2" },
+	rgHitbox = "Head", -- Head | Torso | Legs | Random
+	rgFallback = true, -- hitbox hidden and wallbang off: try the other parts
+	rgPriority = "Distance", -- Distance | Health | Cursor
+	rgMaxDist = 2000,
+	rgFovOn = false,
+	rgFov = 300,
+	rgTeamCheck = true,
+	rgTeamFilter = "All", -- All | Guards | Inmates | Criminals
+	rgFFCheck = true,
+	rgFriends = false, -- skip your Roblox friends
+	rgWall = true, -- wallbang: shoot without a clear line
+	rgPredict = 0,
+	rgOrigin = "Real", -- Real | Spoof (ray origin glued to the target)
+	rgSpoofDist = 3,
+	rgTargets = "Single", -- Single | Cycle | All
+	rgMaxTargets = 4,
+	rgMultiHit = false, -- several players inside one ShootEvent payload
+	rgRapid = false,
+	rgRate = 20,
+	rgBurst = 1,
+	rgGunMods = true, -- GunStates: no spread, autofire, fire rate
+	rgInfAmmo = true,
+	rgAutoEquip = true,
+	rgGun = "Auto", -- Auto | AK-47 | Remington 870 | M9
+	rgAutoGuns = false, -- ask the armory for guns when you have none
+	rgStrafe = false,
+	rgStrafeMode = "Orbit", -- Orbit | Jitter | Behind
+	rgStrafeR = 14,
+	rgStrafeSpeed = 4,
+	rgStrafeY = -2,
+	rgAntiAim = "Off", -- Off | Spin | Jitter | Away
+	rgSpin = 20,
+	rgMelee = false,
+	rgMeleeRange = 12,
+	rgMeleeHits = 3,
 	-- interface
 	menuBind = { kind = "Key", name = "RightShift" },
 	theme = "Dark",
@@ -498,7 +537,7 @@ UI.verLbl = N("TextLabel", {
 	Position = UDim2.new(0, 16, 1, -8),
 	Size = UDim2.new(0.5, -16, 0, 20),
 	BackgroundTransparency = 1,
-	Text = "v2.5 · build 118",
+	Text = "v2.6 · build 124",
 	Font = Enum.Font.RobotoMono,
 	TextSize = 11,
 	TextXAlignment = Enum.TextXAlignment.Left,
@@ -791,6 +830,16 @@ function UI.icon(kind, parent, x, y)
 		fill(box, 11, 1, 6, 6, true)
 		fill(box, 3, 7, 6, 6, true)
 		fill(box, 12, 13, 6, 6, true)
+	elseif kind == "rage" then
+		ring(box, 0, 0, 20, 20)
+		local a = fill(box, 0, 0, 2, 12)
+		a.AnchorPoint = Vector2.new(0.5, 0.5)
+		a.Position = UDim2.fromOffset(10, 10)
+		a.Rotation = 45
+		local b = fill(box, 0, 0, 2, 12)
+		b.AnchorPoint = Vector2.new(0.5, 0.5)
+		b.Position = UDim2.fromOffset(10, 10)
+		b.Rotation = -45
 	elseif kind == "search" then
 		ring(box, 0, 0, 13, 13)
 		local h = fill(box, 0, 0, 2, 8)
@@ -2254,6 +2303,690 @@ function F.fly(cam)
 	S.fv.Velocity = d.Magnitude > 0 and d.Unit * cfg.flyspeed or Vector3.new()
 	S.fg.CFrame = cf
 end
+----------------------------------------------------------------------
+-- Prison Life ragebot (engine shared with the standalone script; UI lives in the Rage tab)
+----------------------------------------------------------------------
+F.rage = {}
+do
+local R = F.rage
+local function notify(a, b) UI.notify(a, b) end
+R.capturing = function() return S.capture ~= nil end
+----------------------------------------------------------------------
+-- Prison Life ragebot engine (shared by the hub's Rage tab and the standalone script)
+-- The wrapper provides: cfg, lp, Players, RunService, UIS, genv, has, on, notify, R
+-- Shots go straight to ReplicatedStorage.ShootEvent, so the camera never moves.
+----------------------------------------------------------------------
+local RS = game:GetService("ReplicatedStorage")
+
+local rayP = RaycastParams.new()
+rayP.FilterType = Enum.RaycastFilterType.Exclude
+rayP.IgnoreWater = true
+
+local ST = {
+	last = 0, lastMelee = 0, lastEquip = 0, lastGive = 0,
+	angle = 0, yaw = 0, cycle = 0, fast = false,
+	pending = {},
+	states = setmetatable({}, { __mode = "k" }),
+	rate0 = setmetatable({}, { __mode = "k" }),
+	friends = {},
+}
+R.stats = { shots = 0, hits = 0 }
+R.cat = { wall = { n = 0, h = 0 }, spoof = { n = 0, h = 0 }, rapid = { n = 0, h = 0 }, multi = { n = 0, h = 0 } }
+R.held = false
+R.active = false
+R.capturing = R.capturing or function() return false end
+
+local CAT_NAME = { wall = "pared", spoof = "origen", rapid = "rapid", multi = "multi" }
+local HINTS = {
+	wall = "El server parece validar la línea de vista. Apaga Wallbang",
+	spoof = "El server parece validar el origen del disparo. Pon Origen en Real",
+	rapid = "El server parece limitar la cadencia. Apaga Rapid fire",
+	multi = "El server parece ignorar los impactos extra. Apaga Multi-hit",
+}
+
+----------------------------------------------------------------------
+-- remote
+----------------------------------------------------------------------
+function R.remote()
+	local sch = R.schema
+	if sch and sch.remote and sch.remote.Parent then return sch.remote end
+	local r = ST.remote
+	if r and r.Parent then return r end
+	r = RS:FindFirstChild("ShootEvent")
+	ST.remote = r
+	return r
+end
+
+----------------------------------------------------------------------
+-- targeting
+----------------------------------------------------------------------
+local GROUPS = {
+	Head = { "Head" },
+	Torso = { "UpperTorso", "Torso", "HumanoidRootPart" },
+	Legs = { "LowerTorso", "Left Leg", "Right Leg", "LeftUpperLeg", "RightUpperLeg" },
+}
+local ROLL = { "Head", "Torso", "Legs" }
+
+local function findPart(char, g)
+	for _, n in ipairs(GROUPS[g]) do
+		local p = char:FindFirstChild(n)
+		if p and p:IsA("BasePart") then return p end
+	end
+end
+
+-- clear line from origin to the part? see-through / non-solid parts are traced through
+local function los(origin, part)
+	local ignore = { lp.Character }
+	for _ = 1, 8 do
+		rayP.FilterDescendantsInstances = ignore
+		local res = workspace:Raycast(origin, part.Position - origin, rayP)
+		if not res then return true end
+		local hit = res.Instance
+		if hit:IsDescendantOf(part.Parent) then return true end
+		if hit.Transparency >= 0.9 or not hit.CanCollide then
+			ignore[#ignore + 1] = hit
+		else
+			return false
+		end
+	end
+	return false
+end
+
+local function protected(char, hum)
+	if char:FindFirstChildOfClass("ForceField") then return true end
+	return hum.Health == math.huge or hum.MaxHealth >= 1e6
+end
+
+local function isFriend(plr)
+	local v = ST.friends[plr.UserId]
+	if v == nil then
+		ST.friends[plr.UserId] = false
+		task.spawn(function()
+			local ok, r = pcall(function() return lp:IsFriendsWith(plr.UserId) end)
+			ST.friends[plr.UserId] = ok and r == true
+		end)
+		return false
+	end
+	return v
+end
+
+local function teamOk(plr)
+	local t = plr.Team
+	if t and t.Name == "Spectators" then return false end
+	if cfg.rgTeamCheck and t ~= nil and t == lp.Team then return false end
+	if cfg.rgTeamFilter ~= "All" and not (t and t.Name == cfg.rgTeamFilter) then return false end
+	return true
+end
+
+-- returns part, hasClearLine (part is nil when nothing can be shot)
+local function choosePart(char, origin)
+	local g = cfg.rgHitbox
+	if g == "Random" then g = ROLL[math.random(#ROLL)] end
+	local part = findPart(char, g) or findPart(char, "Torso")
+	if not part then return nil end
+	local vis = los(origin, part)
+	if vis or cfg.rgWall then return part, vis end
+	if cfg.rgFallback then
+		for _, name in ipairs(ROLL) do
+			if name ~= g then
+				local p = findPart(char, name)
+				if p and los(origin, p) then return p, true end
+			end
+		end
+	end
+	return nil
+end
+
+local function collect(cam, origin)
+	local list = {}
+	local mouse = UIS:GetMouseLocation()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp and teamOk(plr) and not (cfg.rgFriends and isFriend(plr)) then
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 and not (cfg.rgFFCheck and protected(char, hum)) then
+				local part, vis = choosePart(char, origin)
+				if part then
+					local dist = (part.Position - origin).Magnitude
+					if dist <= cfg.rgMaxDist then
+						local score, ok = dist, true
+						if cfg.rgPriority == "Health" then score = hum.Health end
+						if cfg.rgFovOn or cfg.rgPriority == "Cursor" then
+							local sp, onScr = cam:WorldToViewportPoint(part.Position)
+							local pix = (Vector2.new(sp.X, sp.Y) - mouse).Magnitude
+							if cfg.rgFovOn and (not onScr or pix > cfg.rgFov) then ok = false end
+							if cfg.rgPriority == "Cursor" then score = onScr and pix or 1e6 end
+						end
+						if ok then
+							list[#list + 1] = { plr = plr, hum = hum, part = part, vis = vis, score = score }
+						end
+					end
+				end
+			end
+		end
+	end
+	table.sort(list, function(a, b) return a.score < b.score end)
+	return list
+end
+
+local function pickTargets(list)
+	local mode = cfg.rgTargets
+	if mode == "Single" or #list == 1 then return { list[1] } end
+	if mode == "Cycle" then
+		ST.cycle = (ST.cycle % #list) + 1
+		return { list[ST.cycle] }
+	end
+	local out = {}
+	for i = 1, math.min(#list, cfg.rgMaxTargets) do out[i] = list[i] end
+	return out
+end
+
+----------------------------------------------------------------------
+-- guns
+----------------------------------------------------------------------
+local PREF = { ["AK-47"] = 1, ["Remington 870"] = 2, ["M9"] = 3 }
+local ARMORY = { "AK-47", "Remington 870", "M9" }
+
+local function backpack() return lp:FindFirstChild("Backpack") end
+
+local function isGun(t)
+	return t:IsA("Tool") and t:FindFirstChild("GunStates") ~= nil and not t.Name:lower():find("taser", 1, true)
+end
+
+local function pickGun(container)
+	local want, best, rank = cfg.rgGun, nil, 1e9
+	if not container then return nil end
+	for _, t in ipairs(container:GetChildren()) do
+		if isGun(t) then
+			if want ~= "Auto" and t.Name == want then return t end
+			local r = PREF[t.Name] or 50
+			if want == "Auto" and r < rank then best, rank = t, r end
+		end
+	end
+	return best
+end
+
+local function gunStates(tool)
+	local s = ST.states[tool]
+	if s == nil then
+		local ok, r = pcall(function() return require(tool:FindFirstChild("GunStates")) end)
+		s = (ok and type(r) == "table") and r or false
+		ST.states[tool] = s
+	end
+	return s or {}
+end
+
+local function currentGun(char, hum, now)
+	local held = char:FindFirstChildOfClass("Tool")
+	local heldGun = held and isGun(held) and held or nil
+	if heldGun and (cfg.rgGun == "Auto" or heldGun.Name == cfg.rgGun) then return heldGun end
+	if not cfg.rgAutoEquip then return heldGun end
+	if now - ST.lastEquip < 0.35 then return nil end
+	local pick = pickGun(backpack())
+	if pick then
+		ST.lastEquip = now
+		hum:EquipTool(pick) -- the shot goes out next tick, once the tool is in the hand
+		return nil
+	end
+	return heldGun
+end
+
+local function hasTool(name)
+	local bp = backpack()
+	return (bp ~= nil and bp:FindFirstChild(name) ~= nil) or (lp.Character ~= nil and lp.Character:FindFirstChild(name) ~= nil)
+end
+
+-- workspace.Remote.ItemHandler:InvokeServer(Prison_ITEMS.giver[gun].ITEMPICKUP)
+local function giveGuns(now)
+	if ST.giving or now - ST.lastGive < 2.5 then return end
+	local items = workspace:FindFirstChild("Prison_ITEMS")
+	local giver = items and items:FindFirstChild("giver")
+	local remotes = workspace:FindFirstChild("Remote")
+	local handler = remotes and remotes:FindFirstChild("ItemHandler")
+	if not (giver and handler) then return end
+	local missing = {}
+	for _, name in ipairs(ARMORY) do
+		if (cfg.rgGun == "Auto" or cfg.rgGun == name) and not hasTool(name) then
+			local gun = giver:FindFirstChild(name)
+			local pad = gun and gun:FindFirstChild("ITEMPICKUP")
+			if pad then missing[#missing + 1] = pad end
+		end
+	end
+	if #missing == 0 then return end
+	ST.lastGive, ST.giving = now, true
+	task.spawn(function()
+		for _, pad in ipairs(missing) do pcall(function() handler:InvokeServer(pad) end) end
+		ST.giving = false
+	end)
+end
+
+-- only touches fields that exist, so a renamed field is skipped instead of invented
+local function applyMods(tool, s)
+	pcall(function()
+		if cfg.rgInfAmmo then
+			for _, k in ipairs({ "MaxAmmo", "CurrentAmmo", "StoredAmmo" }) do
+				if s[k] ~= nil and s[k] ~= math.huge then s[k] = math.huge end
+			end
+		end
+		if s.FireRate ~= nil and ST.rate0[tool] == nil then ST.rate0[tool] = s.FireRate end
+		if cfg.rgGunMods then
+			if s.SpreadRadius ~= nil and s.SpreadRadius ~= 0 then s.SpreadRadius = 0 end
+			if s.AutoFire ~= nil and s.AutoFire ~= true then s.AutoFire = true end
+			local base = ST.rate0[tool]
+			if base then
+				local want = cfg.rgRapid and (1 / math.max(cfg.rgRate, 1)) or base
+				if s.FireRate ~= want then s.FireRate = want end
+			end
+		end
+	end)
+end
+
+----------------------------------------------------------------------
+-- shot payload: ShootEvent:FireServer({ {RayObject, Distance, Cframe, Hit}, ... }, tool)
+-- once a real shot has been learned, its field names / argument order are copied instead
+----------------------------------------------------------------------
+local function aimPoint(t)
+	local p = t.part.Position
+	if cfg.rgPredict > 0 then p = p + t.part.AssemblyLinearVelocity * (cfg.rgPredict / 1000) end
+	return p
+end
+
+-- ray origin glued to the target: first free side, so a server that checks the line still sees it clear
+local function spoofOrigin(part)
+	local c, d = part.Position, cfg.rgSpoofDist
+	local offs = {
+		Vector3.new(0, d, 0), Vector3.new(d, 0, 0), Vector3.new(-d, 0, 0),
+		Vector3.new(0, 0, d), Vector3.new(0, 0, -d), Vector3.new(0, -d, 0),
+	}
+	for _, o in ipairs(offs) do
+		if los(c + o, part) then return c + o end
+	end
+	return c + offs[1]
+end
+
+local function makeEntry(sample, origin, aim, part)
+	local dir = aim - origin
+	if not sample then
+		return { RayObject = Ray.new(origin, dir), Distance = dir.Magnitude, Cframe = CFrame.new(origin, aim), Hit = part }
+	end
+	local e = {}
+	for k, v in pairs(sample) do
+		local tv, kn = typeof(v), tostring(k):lower()
+		if tv == "Ray" then
+			e[k] = Ray.new(origin, dir)
+		elseif tv == "CFrame" then
+			e[k] = CFrame.new(origin, aim)
+		elseif tv == "Instance" then
+			e[k] = part
+		elseif tv == "number" and (kn:find("dist") or kn:find("range") or kn:find("len")) then
+			e[k] = dir.Magnitude
+		elseif tv == "Vector3" then
+			e[k] = kn:find("dir") and dir.Unit or (kn:find("orig") and origin or aim)
+		else
+			e[k] = v
+		end
+	end
+	return e
+end
+
+local function entriesFor(sample, g)
+	local list = {}
+	for _, e in ipairs(g) do
+		for _ = 1, e.pellets do list[#list + 1] = makeEntry(sample, e.origin, e.aim, e.part) end
+	end
+	return list
+end
+
+local function buildArgs(tool, g)
+	local sch = R.schema
+	if not sch then return { entriesFor(nil, g), tool }, 2 end
+	local args = {}
+	for i = 1, sch.n do
+		local v = sch[i]
+		if i == 1 and type(v) == "table" then
+			args[i] = entriesFor(v[1], g)
+		elseif typeof(v) == "Instance" and v.ClassName == "Tool" then
+			args[i] = tool
+		else
+			args[i] = v
+		end
+	end
+	return args, sch.n
+end
+
+----------------------------------------------------------------------
+-- feedback: did the target actually lose health after our shot?
+----------------------------------------------------------------------
+local function track(e, multi, spoofed)
+	if #ST.pending > 60 then table.remove(ST.pending, 1) end
+	local cats = {}
+	if not e.t.vis then cats[#cats + 1] = "wall" end
+	if spoofed then cats[#cats + 1] = "spoof" end
+	if ST.fast then cats[#cats + 1] = "rapid" end
+	if multi then cats[#cats + 1] = "multi" end
+	ST.pending[#ST.pending + 1] = { t = tick(), hum = e.t.hum, hp = e.t.hum.Health, cats = cats }
+end
+
+local function trackHits(now)
+	local p = ST.pending
+	for i = #p, 1, -1 do
+		local e = p[i]
+		local dmg = e.hum.Health < e.hp - 0.01
+		if dmg or now - e.t > 0.8 then
+			table.remove(p, i)
+			if dmg then R.stats.hits = R.stats.hits + 1 end
+			for _, name in ipairs(e.cats) do
+				local c = R.cat[name]
+				c.n = c.n + 1
+				if dmg then c.h = c.h + 1 end
+				if c.n >= 8 and c.h == 0 and not c.warned then
+					c.warned = true
+					notify("Ragebot", HINTS[name])
+				end
+			end
+		end
+	end
+end
+
+function R.resetStats()
+	R.stats.shots, R.stats.hits = 0, 0
+	for _, c in pairs(R.cat) do c.n, c.h, c.warned = 0, 0, nil end
+	ST.pending = {}
+end
+
+function R.status()
+	local rem = R.remote()
+	local s = R.stats
+	local pct = s.shots > 0 and math.floor(s.hits / s.shots * 100 + 0.5) or 0
+	return string.format("%s · %s · %d tiros · %d con daño (%d%%)",
+		rem and rem.Name or "sin ShootEvent", R.schema and "esquema aprendido" or "esquema base", s.shots, s.hits, pct)
+end
+
+function R.catStatus()
+	local out = {}
+	for _, name in ipairs({ "wall", "spoof", "rapid", "multi" }) do
+		local c = R.cat[name]
+		if c.n > 0 then out[#out + 1] = string.format("%s %d/%d", CAT_NAME[name], c.h, c.n) end
+	end
+	return #out > 0 and ("Impactos por tipo: " .. table.concat(out, " · ")) or "Impactos por tipo: sin datos todavía"
+end
+
+----------------------------------------------------------------------
+-- firing
+----------------------------------------------------------------------
+local function fire(tool, s, picks, head)
+	local rem = R.remote()
+	if not rem then return end
+	local spoofed = cfg.rgOrigin == "Spoof"
+	local pellets = math.max(1, math.floor(tonumber(s.Bullets) or 1))
+	pellets = math.max(1, math.min(pellets, math.floor(40 / #picks))) -- keep payloads small
+	local entries = {}
+	for i, t in ipairs(picks) do
+		entries[i] = {
+			t = t, part = t.part, aim = aimPoint(t), pellets = pellets,
+			origin = spoofed and spoofOrigin(t.part) or head.Position,
+		}
+	end
+	local groups = {}
+	if cfg.rgMultiHit then
+		groups[1] = entries
+	else
+		for i, e in ipairs(entries) do groups[i] = { e } end
+	end
+	for _, g in ipairs(groups) do
+		local args, n = buildArgs(tool, g)
+		local ok = pcall(function() rem:FireServer(table.unpack(args, 1, n)) end)
+		if ok then
+			R.stats.shots = R.stats.shots + #g
+			for _, e in ipairs(g) do track(e, #g > 1, spoofed) end
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- movement: strafe + anti-aim
+----------------------------------------------------------------------
+local function strafe(t, dt, hrp)
+	local c, m, r = t.part.Position, cfg.rgStrafeMode, cfg.rgStrafeR
+	local pos
+	if m == "Orbit" then
+		ST.angle = ST.angle + dt * cfg.rgStrafeSpeed
+		pos = Vector3.new(c.X + math.cos(ST.angle) * r, c.Y + cfg.rgStrafeY, c.Z + math.sin(ST.angle) * r)
+	elseif m == "Jitter" then
+		local a = math.random() * math.pi * 2
+		pos = Vector3.new(c.X + math.cos(a) * r, c.Y + cfg.rgStrafeY, c.Z + math.sin(a) * r)
+	else -- Behind: opposite to where the target is facing
+		local look = t.part.CFrame.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		if flat.Magnitude < 0.01 then flat = Vector3.new(0, 0, 1) end
+		pos = c - flat.Unit * r + Vector3.new(0, cfg.rgStrafeY, 0)
+	end
+	hrp.CFrame = CFrame.lookAt(pos, Vector3.new(c.X, pos.Y, c.Z))
+	hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+end
+
+local function antiAim(dt, hrp, hum, t)
+	local m = cfg.rgAntiAim
+	if m == "Off" then return end
+	hum.AutoRotate = false
+	ST.noRotate = true
+	local pos = hrp.Position
+	if m == "Away" and t then
+		local c = t.part.Position
+		hrp.CFrame = CFrame.lookAt(pos, Vector3.new(2 * pos.X - c.X, pos.Y, 2 * pos.Z - c.Z))
+		return
+	end
+	if m == "Spin" then
+		ST.yaw = ST.yaw + dt * cfg.rgSpin
+	else
+		ST.yaw = math.random() * math.pi * 2
+	end
+	hrp.CFrame = CFrame.new(pos) * CFrame.Angles(0, ST.yaw, 0)
+end
+
+-- meleeEvent:FireServer(player), repeated a few times per target
+local function melee(now, hrp)
+	if now - ST.lastMelee < 0.12 then return end
+	local ev = RS:FindFirstChild("meleeEvent")
+	if not ev then return end
+	ST.lastMelee = now
+	local hits = 0
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= lp and teamOk(plr) and not (cfg.rgFriends and isFriend(plr)) then
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if hum and root and hum.Health > 0 and not (cfg.rgFFCheck and protected(char, hum))
+				and (root.Position - hrp.Position).Magnitude <= cfg.rgMeleeRange then
+				for _ = 1, cfg.rgMeleeHits do ev:FireServer(plr) end
+				hits = hits + 1
+				if hits >= 3 then return end
+			end
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- main step
+----------------------------------------------------------------------
+function R.restore()
+	R.active = false
+	if ST.noRotate then
+		ST.noRotate = false
+		local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if hum then hum.AutoRotate = true end
+	end
+end
+
+function R.step(dt)
+	if not cfg.rgOn then
+		if R.active then R.restore() end
+		return
+	end
+	local char = lp.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local head = char and char:FindFirstChild("Head")
+	if not (hum and hrp and head) or hum.Health <= 0 then return end
+	local now = tick()
+
+	if R.learning and now - ST.learnT > 20 then
+		R.learning = false
+		notify("Ragebot", "Tiempo agotado: no vi ningún disparo")
+	end
+	trackHits(now)
+	if cfg.rgAutoGuns then giveGuns(now) end
+	if cfg.rgMelee then melee(now, hrp) end
+
+	if cfg.rgActivate == "Hold" and not R.held then
+		if R.active then R.restore() end
+		return
+	end
+	R.active = true
+
+	local cam = workspace.CurrentCamera
+	local list = collect(cam, head.Position)
+	local primary = list[1]
+	if cfg.rgStrafe and primary then strafe(primary, dt, hrp) end
+	if cfg.rgAntiAim ~= "Off" then
+		antiAim(dt, hrp, hum, primary)
+	elseif ST.noRotate then
+		hum.AutoRotate = true
+		ST.noRotate = false
+	end
+	if not primary then return end
+
+	local tool = currentGun(char, hum, now)
+	if not tool then return end
+	local s = gunStates(tool)
+	applyMods(tool, s)
+
+	local base = ST.rate0[tool] or tonumber(s.FireRate) or 0.1
+	local interval = cfg.rgRapid and (1 / math.max(cfg.rgRate, 1)) or base
+	if now - ST.last < interval then return end
+	ST.last = now
+	ST.fast = cfg.rgRapid and interval < base * 0.95
+
+	local picks = pickTargets(list)
+	for _ = 1, (cfg.rgRapid and cfg.rgBurst or 1) do
+		fire(tool, s, picks, head)
+	end
+end
+
+----------------------------------------------------------------------
+-- learn a real shot: hook the next FireServer that carries a hit table + your tool,
+-- and copy its remote, argument order and field names (survives game updates)
+----------------------------------------------------------------------
+function R.onLearn(remote, args)
+	local first = args[1]
+	local sample = type(first) == "table" and type(first[1]) == "table" and first[1]
+	if not sample then return end
+	local sch = { n = args.n, remote = remote }
+	for i = 1, args.n do sch[i] = args[i] end
+	R.schema = sch
+	R.learning = false
+	local keys = {}
+	for k in pairs(sample) do keys[#keys + 1] = tostring(k) end
+	table.sort(keys)
+	task.defer(notify, "Disparo aprendido", remote.Name .. " { " .. table.concat(keys, ", ") .. " }")
+end
+
+function R.hook()
+	if genv.__PL_RG_HOOKED then return true end
+	if not has.hook then return false end
+	local old
+	-- no method calls inside the hook (they would overwrite the namecall method of the call in flight)
+	old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local G = genv.__PL_RG
+		if G and G.learning and getnamecallmethod() == "FireServer" and not checkcaller() then
+			local args = table.pack(...)
+			if type(args[1]) == "table" and typeof(self) == "Instance" and self.ClassName == "RemoteEvent" then
+				local hasTool = false
+				for i = 2, args.n do
+					if typeof(args[i]) == "Instance" and args[i].ClassName == "Tool" then hasTool = true end
+				end
+				if hasTool then pcall(G.onLearn, self, args) end
+			end
+		end
+		return old(self, ...)
+	end))
+	genv.__PL_RG_HOOKED = true
+	return true
+end
+
+function R.learn()
+	if not R.hook() then
+		notify("Ragebot", "Tu executor no tiene hookmetamethod")
+		return false
+	end
+	genv.__PL_RG = R
+	ST.learnT = tick()
+	R.learning = true
+	notify("Ragebot", "Dispara una vez a mano con tu arma")
+	return true
+end
+
+function R.forget()
+	R.schema, R.learning = nil, false
+	notify("Ragebot", "Esquema aprendido borrado")
+end
+
+-- prints the held gun's GunStates (names and values) so field names can be checked in the field
+function R.dump()
+	local char = lp.Character
+	local tool = char and char:FindFirstChildOfClass("Tool")
+	if not (tool and isGun(tool)) then tool = pickGun(backpack()) end
+	if not tool then return notify("GunStates", "No tienes arma") end
+	local s = gunStates(tool)
+	local keys = {}
+	for k in pairs(s) do keys[#keys + 1] = tostring(k) end
+	table.sort(keys)
+	if #keys == 0 then return notify("GunStates", tool.Name .. ": no se pudo leer") end
+	local parts = {}
+	for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. tostring(s[k]) end
+	local text = table.concat(parts, ", ")
+	warn("[ragebot] GunStates " .. tool.Name .. ": " .. text)
+	notify("GunStates " .. tool.Name, #text > 110 and (text:sub(1, 107) .. "...") or text)
+end
+
+function R.unload()
+	R.restore()
+	R.learning = false
+	if genv.__PL_RG == R then genv.__PL_RG = nil end
+	for tool, base in pairs(ST.rate0) do
+		local s = ST.states[tool]
+		if s then pcall(function() s.FireRate = base end) end
+	end
+end
+
+----------------------------------------------------------------------
+-- hold key + frame loop
+----------------------------------------------------------------------
+local function bindHit(b, input)
+	if not b then return false end
+	if b.kind == "Key" then
+		return input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode.Name == b.name
+	end
+	return input.UserInputType.Name == b.name
+end
+
+on(UIS.InputBegan, function(input, gpe)
+	if gpe or R.capturing() then return end
+	if bindHit(cfg.rgHold, input) then R.held = true end
+end)
+on(UIS.InputEnded, function(input)
+	if bindHit(cfg.rgHold, input) then R.held = false end
+end)
+
+on(RunService.Heartbeat, function(dt)
+	local ok, err = pcall(R.step, dt)
+	if not ok and not ST.err then
+		ST.err = true
+		warn("[ragebot] " .. tostring(err))
+	end
+end)
+end
+cfg.rgOn = false -- every session starts with the ragebot off
 
 ----------------------------------------------------------------------
 -- configs (JSON files in the executor workspace; DIR comes from the core part)
@@ -2306,6 +3039,7 @@ end
 -- tabs (rail icons; Ajustes is created first so it sits at the very bottom)
 ----------------------------------------------------------------------
 local general = UI.addTab("General", "target", "Apuntado y chequeos")
+local rage = UI.addTab("Rage", "rage", "Ragebot de Prison Life")
 local visual = UI.addTab("Visual", "eye", "ESP y chams")
 local player = UI.addTab("Jugador", "user", "Movimiento y utilidades")
 local themes = UI.addTab("Temas", "mix", "Color de acento y fondo")
@@ -2334,6 +3068,58 @@ general:toggle("Silent aim", "silentAim")
 general:section("TRIGGERBOT")
 general:toggle("Triggerbot", "trigger")
 general:slider("Delay del trigger", "triggerDelay", 0, 500, " ms")
+
+rage:section("RAGEBOT (PRISON LIFE)")
+rage:toggle("Ragebot", "rgOn")
+rage:dropdown("Activación", "rgActivate", { { "Always", "Siempre" }, { "Hold", "Mantener tecla" } })
+rage:keybind("Tecla (modo mantener)", "rgHold")
+local rgStatus = rage:info("...")
+local rgCats = rage:info("...")
+rage:button("Reiniciar contadores", function() F.rage.resetStats() end)
+rage:section("OBJETIVO")
+rage:dropdown("Hitbox", "rgHitbox", { { "Head", "Cabeza" }, { "Torso", "Torso" }, { "Legs", "Piernas" }, { "Random", "Aleatorio" } })
+rage:toggle("Probar otras partes si no se ve", "rgFallback")
+rage:dropdown("Prioridad", "rgPriority", { { "Distance", "Distancia" }, { "Health", "Vida" }, { "Cursor", "Cursor" } })
+rage:slider("Distancia máxima", "rgMaxDist", 50, 3000, " studs")
+rage:toggle("Limitar al FOV", "rgFovOn")
+rage:slider("Radio del FOV", "rgFov", 50, 800, " px")
+rage:dropdown("Equipos objetivo", "rgTeamFilter", { { "All", "Todos" }, { "Guards", "Guards" }, { "Inmates", "Inmates" }, { "Criminals", "Criminals" } })
+rage:toggle("Team check", "rgTeamCheck")
+rage:toggle("FF check (spawn protegido)", "rgFFCheck")
+rage:toggle("Ignorar amigos de Roblox", "rgFriends")
+rage:slider("Predicción de movimiento", "rgPredict", 0, 300, " ms")
+rage:section("DISPARO")
+rage:toggle("Wallbang (sin línea de vista)", "rgWall")
+rage:dropdown("Origen del disparo", "rgOrigin", { { "Real", "Real (tu cabeza)" }, { "Spoof", "Pegado al objetivo" } })
+rage:slider("Distancia del origen falso", "rgSpoofDist", 1, 10, " studs")
+rage:dropdown("Objetivos por disparo", "rgTargets", { { "Single", "Uno" }, { "Cycle", "Rotar" }, { "All", "Todos" } })
+rage:slider("Máximo de objetivos", "rgMaxTargets", 2, 12)
+rage:toggle("Multi-hit (varios en un disparo)", "rgMultiHit")
+rage:section("CADENCIA Y ARMA")
+rage:toggle("Rapid fire", "rgRapid")
+rage:slider("Disparos por segundo", "rgRate", 1, 60)
+rage:slider("Ráfaga por tick", "rgBurst", 1, 5)
+rage:toggle("Mods de arma (sin spread, autofire)", "rgGunMods")
+rage:toggle("Munición infinita", "rgInfAmmo")
+rage:toggle("Auto equipar", "rgAutoEquip")
+rage:dropdown("Arma", "rgGun", { { "Auto", "Automática" }, { "AK-47", "AK-47" }, { "Remington 870", "Remington 870" }, { "M9", "M9" } })
+rage:toggle("Auto armería (pedir armas)", "rgAutoGuns")
+rage:button("Ver GunStates del arma", function() F.rage.dump() end)
+rage:section("MOVIMIENTO")
+rage:toggle("Strafe", "rgStrafe")
+rage:dropdown("Tipo de strafe", "rgStrafeMode", { { "Orbit", "Órbita" }, { "Jitter", "Saltos al azar" }, { "Behind", "Detrás" } })
+rage:slider("Radio del strafe", "rgStrafeR", 3, 60, " studs")
+rage:slider("Velocidad de la órbita", "rgStrafeSpeed", 1, 20)
+rage:slider("Altura del strafe", "rgStrafeY", -10, 20, " studs")
+rage:dropdown("Anti-aim", "rgAntiAim", { { "Off", "Apagado" }, { "Spin", "Giro" }, { "Jitter", "Temblor" }, { "Away", "De espaldas" } })
+rage:slider("Velocidad de giro", "rgSpin", 1, 60)
+rage:section("MELEE")
+rage:toggle("Melee aura", "rgMelee")
+rage:slider("Alcance melee", "rgMeleeRange", 3, 30, " studs")
+rage:slider("Golpes por tick", "rgMeleeHits", 1, 6)
+rage:section("AJUSTE AUTOMÁTICO")
+rage:button("Aprender disparo (dispara 1 vez a mano)", function() F.rage.learn() end)
+rage:button("Olvidar disparo aprendido", function() F.rage.forget() end)
 
 visual:section("ESP")
 visual:toggle("Cajas", "espBox")
@@ -2430,7 +3216,8 @@ end)
 about:section("CRÉDITOS")
 about:credits()
 about:section("NOVEDADES")
-about:notes("Versión 2.5", {
+about:notes("Versión 2.6", {
+	"Pestaña Rage: ragebot completo para Prison Life",
 	"Interfaz nueva: riel de pestañas y tarjeta de jugador",
 	"Avatar 3D girando y saludo según la hora",
 	"Atajos visibles junto a cada opción",
@@ -2553,6 +3340,10 @@ RunService:BindToRenderStep("UA_main", Enum.RenderPriority.Camera.Value + 1, fun
 		local ping = UI.ping()
 		UI.liveLbl.Text = ping and string.format("%3d FPS  ·  %3d ms", fps, math.floor(ping + 0.5)) or string.format("%3d FPS", fps)
 		setStats(string.format("FPS: %d  |  Jugadores: %d", fps, #Players:GetPlayers()))
+		if UI.current == "Rage" then
+			rgStatus(F.rage.status())
+			rgCats(F.rage.catStatus())
+		end
 		S.fpsAcc, S.fpsN = 0, 0
 	end
 	if S.infoAcc >= 1 then
@@ -2566,6 +3357,7 @@ end)
 ----------------------------------------------------------------------
 genv.__UA_UNLOAD = function()
 	pcall(F.autosaveNow)
+	pcall(F.rage.unload)
 	pcall(function() RunService:UnbindFromRenderStep("UA_main") end)
 	for _, c in ipairs(S.conns) do pcall(function() c:Disconnect() end) end
 	if genv.__UA_G then genv.__UA_G.enabled = false end
