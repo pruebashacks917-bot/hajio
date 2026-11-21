@@ -102,6 +102,7 @@ local cfg = {
 	rgInfAmmo = true,
 	rgAutoEquip = true,
 	rgGun = "Auto", -- Auto | AK-47 | Remington 870 | M9
+	rgGrabMode = "Auto", -- Auto (touch + click, remote last) | Touch | Click | Remote
 	rgAutoGuns = false, -- ask the armory for guns when you have none
 	rgStrafe = false,
 	rgStrafeMode = "Orbit", -- Orbit | Jitter | Behind
@@ -127,6 +128,10 @@ local cfg = {
 	sounds = true, -- soft click on switches, whoosh on open
 	streamer = false,
 	autosave = true, -- remember settings between sessions
+	hud = true, -- watermark (name, fps, ping) at the top of the screen
+	hudList = true, -- list of active functions on the left
+	panicBind = { kind = "Key", name = "Delete" }, -- turns every function off and hides the menu
+	fold = { ["Rage/MELEE"] = true, ["Rage/AJUSTE AUTOMÁTICO"] = true }, -- sections folded in the menu ("Tab/NAME")
 	rank = "PRO",
 	credit = "Tu nombre",
 	winX = 60,
@@ -160,7 +165,7 @@ end
 ----------------------------------------------------------------------
 -- shared namespaces (tables keep the local/upvalue counts low)
 ----------------------------------------------------------------------
-local UI = { themed = {}, rows = {}, refreshers = {}, painters = {}, toggles = {}, pages = {}, tabBtns = {}, tabOrder = {}, meta = {}, open = false }
+local UI = { themed = {}, rows = {}, refreshers = {}, painters = {}, toggles = {}, pages = {}, tabBtns = {}, tabOrder = {}, meta = {}, open = false, grads = {}, hooks = {} }
 local F = {}
 local S = { rolls = {}, esp = {}, orig = {}, nc = {}, conns = {}, aimHeld = false, lastClick = 0, startT = tick(), protCache = setmetatable({}, { __mode = "k" }) }
 
@@ -197,6 +202,7 @@ end
 
 -- debounced: many quick changes (dragging a slider) end in one write
 function UI.changed()
+	for _, h in ipairs(UI.hooks) do pcall(h) end
 	if not (cfg.autosave and has.files) then return end
 	S.saveTok = (S.saveTok or 0) + 1
 	local tok = S.saveTok
@@ -223,6 +229,24 @@ local THEMES = {
 		text = Color3.fromRGB(24, 28, 40), sub = Color3.fromRGB(84, 90, 106), faint = Color3.fromRGB(140, 146, 160),
 		offtrack = Color3.fromRGB(214, 218, 228), offknob = Color3.fromRGB(160, 166, 180),
 	},
+	Obsidian = {
+		bg = Color3.fromRGB(14, 13, 20), side = Color3.fromRGB(9, 8, 14), card = Color3.fromRGB(22, 20, 32), hi = Color3.fromRGB(30, 27, 44),
+		track = Color3.fromRGB(9, 8, 14), chip = Color3.fromRGB(18, 17, 27), stroke = Color3.fromRGB(44, 40, 64), line = Color3.fromRGB(30, 28, 44),
+		text = Color3.fromRGB(240, 238, 250), sub = Color3.fromRGB(176, 170, 200), faint = Color3.fromRGB(112, 106, 136),
+		offtrack = Color3.fromRGB(40, 37, 58), offknob = Color3.fromRGB(130, 124, 156),
+	},
+	Ocean = {
+		bg = Color3.fromRGB(11, 22, 30), side = Color3.fromRGB(7, 15, 22), card = Color3.fromRGB(18, 34, 46), hi = Color3.fromRGB(24, 44, 60),
+		track = Color3.fromRGB(7, 15, 22), chip = Color3.fromRGB(14, 28, 38), stroke = Color3.fromRGB(36, 62, 82), line = Color3.fromRGB(24, 44, 58),
+		text = Color3.fromRGB(232, 244, 250), sub = Color3.fromRGB(156, 184, 200), faint = Color3.fromRGB(92, 122, 140),
+		offtrack = Color3.fromRGB(34, 56, 72), offknob = Color3.fromRGB(120, 150, 168),
+	},
+	Crimson = {
+		bg = Color3.fromRGB(22, 13, 15), side = Color3.fromRGB(15, 8, 10), card = Color3.fromRGB(34, 20, 24), hi = Color3.fromRGB(46, 27, 32),
+		track = Color3.fromRGB(15, 8, 10), chip = Color3.fromRGB(28, 16, 20), stroke = Color3.fromRGB(66, 38, 44), line = Color3.fromRGB(44, 26, 30),
+		text = Color3.fromRGB(250, 238, 240), sub = Color3.fromRGB(200, 170, 176), faint = Color3.fromRGB(136, 104, 110),
+		offtrack = Color3.fromRGB(60, 36, 42), offknob = Color3.fromRGB(156, 124, 130),
+	},
 	Midnight = {
 		bg = Color3.fromRGB(10, 13, 26), side = Color3.fromRGB(6, 8, 18), card = Color3.fromRGB(20, 25, 46), hi = Color3.fromRGB(28, 34, 62),
 		track = Color3.fromRGB(8, 10, 22), chip = Color3.fromRGB(16, 20, 38), stroke = Color3.fromRGB(40, 48, 88), line = Color3.fromRGB(26, 32, 58),
@@ -231,6 +255,22 @@ local THEMES = {
 	},
 }
 local T = {}
+
+-- second gradient color: same accent, hue nudged a little and a touch brighter (plain arithmetic, no Color3 math)
+local function accentShift(c)
+	local r, g, b = c[1] / 255, c[2] / 255, c[3] / 255
+	local mx, mn = math.max(r, g, b), math.min(r, g, b)
+	local d = mx - mn
+	local h = 0
+	if d > 0 then
+		if mx == r then h = ((g - b) / d) % 6
+		elseif mx == g then h = (b - r) / d + 2
+		else h = (r - g) / d + 4 end
+		h = h / 6
+	end
+	local sat = mx == 0 and 0 or d / mx
+	return Color3.fromHSV((h + 0.07) % 1, math.min(1, sat * 0.92), math.min(1, mx * 1.05 + 0.02))
+end
 
 function UI.computeTheme()
 	local base = THEMES[cfg.theme]
@@ -257,6 +297,7 @@ function UI.computeTheme()
 	end
 	for k, v in pairs(base) do T[k] = v end
 	T.accent = col(cfg.accent)
+	T.accent2 = accentShift(cfg.accent)
 end
 UI.computeTheme()
 
@@ -276,6 +317,14 @@ end
 
 local function corner(parent, r)
 	return N("UICorner", { CornerRadius = UDim.new(0, r or 8) }, parent)
+end
+
+-- accent gradient (accent -> accent2). The frame itself must be white so the gradient shows its true colors;
+-- it is recolored in applyTheme. rot: 0 = left to right, 90 = top to bottom
+local function agrad(parent, rot)
+	local g = N("UIGradient", { Rotation = rot or 0, Color = ColorSequence.new(T.accent, T.accent2) }, parent)
+	UI.grads[#UI.grads + 1] = g
+	return g
 end
 
 -- every animation eases out (Quint): fast start, soft landing, never linear
@@ -302,6 +351,10 @@ function UI.applyTheme()
 		else
 			e[1][e[2]] = T[e[3]]
 		end
+	end
+	for i = #UI.grads, 1, -1 do
+		local g = UI.grads[i]
+		if g.Parent == nil then table.remove(UI.grads, i) else g.Color = ColorSequence.new(T.accent, T.accent2) end
 	end
 	for _, p in ipairs(UI.painters) do pcall(p) end -- state-dependent colors (switches, tabs, ...)
 end
@@ -399,10 +452,10 @@ local dim = N("Frame", {
 ----------------------------------------------------------------------
 -- window: rail (tabs) on the left; strip + player card + search + page on the right
 ----------------------------------------------------------------------
-local RAIL_W = 68
+local RAIL_W = 76
 local scr0 = UI.screen()
-local WIN_W = math.min(600, scr0.X - 24)
-local WIN_H = math.min(560, scr0.Y - 48)
+local WIN_W = math.min(640, scr0.X - 24)
+local WIN_H = math.min(600, scr0.Y - 48)
 local LOW = 128 -- y where the lower part (search, heading, page) starts; also the collapsed height
 UI.WIN_W, UI.WIN_H = WIN_W, WIN_H
 
@@ -457,15 +510,20 @@ local rail = N("Frame", { Size = UDim2.new(0, RAIL_W, 1, 0), BorderSizePixel = 0
 N("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.fromScale(1, 0), Size = UDim2.new(0, 1, 1, 0), BorderSizePixel = 0 }, rail, { BackgroundColor3 = "line" })
 
 local logo = N("TextLabel", {
-	Position = UDim2.fromOffset(12, 12),
+	Position = UDim2.fromOffset(16, 14),
 	Size = UDim2.fromOffset(44, 44),
 	Text = "H",
 	Font = Enum.Font.GothamBold,
 	TextSize = 22,
 	TextColor3 = Color3.fromRGB(17, 19, 23),
+	BackgroundColor3 = Color3.new(1, 1, 1),
 	BorderSizePixel = 0,
-}, rail, { BackgroundColor3 = "accent" })
-corner(logo, 8)
+}, rail)
+corner(logo, 10)
+agrad(logo, 135)
+do
+	local glow = N("UIStroke", { Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Transparency = 0.7 }, logo, { Color = "accent" })
+end
 
 local navTop = N("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, rail)
 local navBot = N("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, rail)
@@ -488,6 +546,16 @@ do
 			NumberSequenceKeypoint.new(1, 1),
 		}),
 	}, hl)
+end
+
+-- 2px accent line along the very top of the window, fading out at both ends
+do
+	local bar = N("Frame", { Size = UDim2.new(1, 0, 0, 2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 6 }, body)
+	agrad(bar, 0).Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.85),
+		NumberSequenceKeypoint.new(0.5, 0),
+		NumberSequenceKeypoint.new(1, 0.85),
+	})
 end
 
 -- top strip: drag handle (click without moving collapses) + live fps / ping on the right
@@ -545,7 +613,7 @@ UI.verLbl = N("TextLabel", {
 	Position = UDim2.new(0, 16, 1, -8),
 	Size = UDim2.new(0.5, -16, 0, 20),
 	BackgroundTransparency = 1,
-	Text = "v2.7 · build 131",
+	Text = "v2.8 · build 140",
 	Font = Enum.Font.RobotoMono,
 	TextSize = 11,
 	TextXAlignment = Enum.TextXAlignment.Left,
@@ -620,7 +688,8 @@ function UI.notify(title, sub)
 	corner(f, 8)
 	local st = stroke(f, 1, "stroke")
 	st.Transparency = 1
-	local bar = N("Frame", { Position = UDim2.fromOffset(12, 12), Size = UDim2.new(0, 3, 1, -24), BackgroundTransparency = 1, BorderSizePixel = 0 }, f, { BackgroundColor3 = "accent" })
+	local isOff = sub ~= nil and sub:find("^Desactivado") ~= nil
+	local bar = N("Frame", { Position = UDim2.fromOffset(12, 12), Size = UDim2.new(0, 3, 1, -24), BackgroundTransparency = 1, BorderSizePixel = 0 }, f, { BackgroundColor3 = isOff and "faint" or "accent" })
 	corner(bar, 9999)
 	local t1 = N("TextLabel", {
 		Position = UDim2.fromOffset(28, sub and 10 or 0),
@@ -740,6 +809,7 @@ function UI.setOpen(v)
 		end)
 	end
 	if UI.avatarShow then UI.avatarShow(v) end
+	if UI.hudStep then UI.hudStep() end
 end
 
 function UI.retheme()
@@ -906,8 +976,9 @@ end
 -- tabs: icon buttons on the rail, accent indicator that slides to the active one
 ----------------------------------------------------------------------
 UI.nTop, UI.nBot = 0, 0
-UI.ind = N("Frame", { Size = UDim2.fromOffset(3, 20), Position = UDim2.fromOffset(0, 88), BorderSizePixel = 0 }, rail, { BackgroundColor3 = "accent" })
+UI.ind = N("Frame", { Size = UDim2.fromOffset(3, 24), Position = UDim2.fromOffset(0, 95), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, rail)
 corner(UI.ind, 9999)
+agrad(UI.ind, 90)
 
 function UI.paintTabs()
 	for n, t in pairs(UI.tabBtns) do
@@ -915,6 +986,7 @@ function UI.paintTabs()
 		tw(t.b, 0.25, { BackgroundTransparency = act and 0 or (t.hover and 0.6 or 1) })
 		tw(t.st, 0.25, { Transparency = act and 0.78 or 1 }) -- very faint accent glow on the active tab
 		t.ic.paint(act and T.text:Lerp(T.accent, 0.45) or (t.hover and T.sub or T.faint))
+		t.lb.TextColor3 = act and T.text or (t.hover and T.sub or T.faint)
 	end
 end
 UI.painters[#UI.painters + 1] = UI.paintTabs
@@ -948,17 +1020,17 @@ function UI.addTab(name, icon, sub, bottom)
 	if bottom then
 		local i = UI.nBot
 		UI.nBot = i + 1
-		pos = UDim2.new(0, 12, 1, -(56 + i * 52))
-		ind = UDim2.new(0, 0, 1, -(44 + i * 52))
+		pos = UDim2.new(0, 10, 1, -(62 + i * 58))
+		ind = UDim2.new(0, 0, 1, -(49 + i * 58))
 	else
 		local i = UI.nTop
 		UI.nTop = i + 1
-		pos = UDim2.fromOffset(12, 76 + i * 52)
-		ind = UDim2.fromOffset(0, 88 + i * 52)
+		pos = UDim2.fromOffset(10, 82 + i * 58)
+		ind = UDim2.fromOffset(0, 95 + i * 58)
 	end
 	local b = N("TextButton", {
 		Position = pos,
-		Size = UDim2.fromOffset(44, 44),
+		Size = UDim2.fromOffset(56, 50),
 		Text = "",
 		AutoButtonColor = false,
 		BorderSizePixel = 0,
@@ -966,9 +1038,17 @@ function UI.addTab(name, icon, sub, bottom)
 	}, bottom and navBot or navTop, { BackgroundColor3 = "card" })
 	corner(b, 8)
 	local st = N("UIStroke", { Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Transparency = 1 }, b, { Color = "accent" })
-	local ic = UI.icon(icon, b, 12, 12)
+	local ic = UI.icon(icon, b, 18, 7)
+	local lb = N("TextLabel", {
+		Position = UDim2.fromOffset(0, 30),
+		Size = UDim2.new(1, 0, 0, 14),
+		BackgroundTransparency = 1,
+		Text = name,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 10,
+	}, b, { TextColor3 = "faint" })
 	UI.pressFX(b)
-	local tab = { b = b, st = st, ic = ic, hover = false }
+	local tab = { b = b, st = st, ic = ic, lb = lb, hover = false }
 	b.MouseEnter:Connect(function() tab.hover = true; UI.paintTabs() end)
 	b.MouseLeave:Connect(function() tab.hover = false; UI.paintTabs() end)
 
@@ -1041,7 +1121,8 @@ function UI.hoverStep(dt)
 	end
 end
 
--- filter rows by name; jumps to the first tab that has a match
+-- filter rows by name; jumps to the first tab that has a match. A row also hides while its section is folded
+-- (unless something is being searched: matches always show, folded or not)
 function UI.search(q)
 	q = q:lower()
 	local counts = {}
@@ -1049,8 +1130,10 @@ function UI.search(q)
 		local vis
 		if r.section then
 			vis = (q == "")
+		elseif q == "" then
+			vis = not (r.sec and r.sec.folded)
 		else
-			vis = (q == "") or (r.name:find(q, 1, true) ~= nil)
+			vis = (r.name:find(q, 1, true) ~= nil)
 			if vis then counts[r.page] = (counts[r.page] or 0) + 1 end
 		end
 		r.f.Visible = vis
@@ -1071,6 +1154,15 @@ UI.searchBox:GetPropertyChangedSignal("Text"):Connect(function() UI.search(UI.se
 ----------------------------------------------------------------------
 do
 	local card = UI.card
+
+	-- soft accent wash behind the card content (left to right, fading out) + hairline border
+	local wash = N("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 0 }, card)
+	corner(wash, 8)
+	agrad(wash, 0).Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.84),
+		NumberSequenceKeypoint.new(1, 0.97),
+	})
+	stroke(card, 1, "line")
 
 	local slot = N("Frame", { Position = UDim2.fromOffset(12, 12), Size = UDim2.fromOffset(72, 72), BorderSizePixel = 0 }, card, { BackgroundColor3 = "chip" })
 	corner(slot, 6)
@@ -1282,6 +1374,90 @@ function UI.ping()
 	end)
 	return (ok and type(v) == "number") and v or nil
 end
+----------------------------------------------------------------------
+-- HUD: watermark pill at the top (name, fps, ping) + list of active functions on the left (hidden while the menu is open)
+----------------------------------------------------------------------
+local HUD_ON = {
+	{ "aimbot", "Aimbot" }, { "silentAim", "Silent aim" }, { "trigger", "Triggerbot" }, { "rgOn", "Ragebot" },
+	{ "rgStrafe", "Strafe" }, { "rgMelee", "Melee aura" }, { "espBox", "ESP" }, { "chams", "Chams" },
+	{ "speed", "Velocidad" }, { "jump", "Salto" }, { "fly", "Vuelo" }, { "noclip", "Noclip" }, { "infjump", "Salto infinito" },
+}
+
+do
+	local mark = N("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 10),
+		Size = UDim2.fromOffset(0, 30),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, gui, { BackgroundColor3 = "card" })
+	corner(mark, 8)
+	stroke(mark, 1, "stroke")
+	N("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder }, mark)
+	N("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 12) }, mark)
+	local tile = N("TextLabel", {
+		Size = UDim2.fromOffset(20, 20),
+		Text = "H",
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = Color3.fromRGB(17, 19, 23),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		LayoutOrder = 1,
+	}, mark)
+	corner(tile, 6)
+	agrad(tile, 135)
+	N("TextLabel", { Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "Universal Hub", Font = Enum.Font.GothamMedium, TextSize = 12, LayoutOrder = 2 }, mark, { TextColor3 = "text" })
+	local live = N("TextLabel", { Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "", Font = Enum.Font.RobotoMono, TextSize = 11, LayoutOrder = 3 }, mark, { TextColor3 = "faint" })
+
+	local list = N("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 12, 0.42, 0),
+		Size = UDim2.fromOffset(0, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		BackgroundTransparency = 1,
+		Visible = false,
+	}, gui)
+	N("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+
+	local made, shown = {}, ""
+	local lastFps, lastPing = 0, nil
+
+	-- called twice a second with fps / ping, and whenever the menu opens or closes
+	function UI.hudStep(fps, ping)
+		if fps then lastFps, lastPing = fps, ping end
+		local hide = cfg.streamer
+		mark.Visible = cfg.hud and not hide
+		list.Visible = cfg.hudList and not hide and not UI.open
+		if mark.Visible then
+			live.Text = lastPing and string.format("%d FPS  ·  %d ms", lastFps, math.floor(lastPing + 0.5)) or string.format("%d FPS", lastFps)
+		end
+		if not list.Visible then return end
+		local names = {}
+		for _, e in ipairs(HUD_ON) do
+			if cfg[e[1]] then names[#names + 1] = e[2] end
+		end
+		if cfg.rgDesync ~= "Off" then names[#names + 1] = "Desync · " .. cfg.rgDesync end
+		if cfg.rgAntiAim ~= "Off" then names[#names + 1] = "Anti-aim · " .. cfg.rgAntiAim end
+		local key = table.concat(names, "|")
+		if key == shown then return end
+		shown = key
+		for _, f in ipairs(made) do f:Destroy() end
+		made = {}
+		for i, nm in ipairs(names) do
+			local row = N("Frame", { Size = UDim2.fromOffset(0, 22), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 0.15, BorderSizePixel = 0, LayoutOrder = i }, list, { BackgroundColor3 = "card" })
+			corner(row, 5)
+			N("UIPadding", { PaddingRight = UDim.new(0, 10) }, row)
+			local bar = N("Frame", { Size = UDim2.new(0, 3, 1, 0), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, row)
+			corner(bar, 9999)
+			agrad(bar, 90)
+			N("TextLabel", { Position = UDim2.fromOffset(10, 0), Size = UDim2.fromOffset(0, 22), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = nm, Font = Enum.Font.GothamMedium, TextSize = 12 }, row, { TextColor3 = "text" })
+			made[#made + 1] = row
+		end
+	end
+	UI.refreshers[#UI.refreshers + 1] = function() shown = ""; UI.hudStep() end
+end
 
 ----------------------------------------------------------------------
 -- components: rounded cards (radius 8), inner chips (radius 6), 16px side padding
@@ -1309,7 +1485,7 @@ end
 local function keycap(parent, rightOff, text, minW)
 	local b = N("TextButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -rightOff, 0, ROW / 2),
+		Position = UDim2.new(1, -rightOff, 0.5, 0),
 		Size = UDim2.fromOffset(minW or 32, 24),
 		AutomaticSize = Enum.AutomaticSize.X,
 		Text = text,
@@ -1327,28 +1503,69 @@ end
 
 function TM.row(self, h, text)
 	self.n = (self.n or 0) + 1
-	local f = N("Frame", { Size = UDim2.new(1, 0, 0, h), BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = self.n }, self.page, { BackgroundColor3 = "card" })
+	local sec = self.cur
+	local f = N("Frame", { Size = UDim2.new(1, 0, 0, h), BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = self.n, Visible = not (sec and sec.folded) }, self.page, { BackgroundColor3 = "card" })
 	corner(f, 8)
-	UI.rows[#UI.rows + 1] = { f = f, name = (text or ""):lower(), page = self.name }
+	local e = { f = f, name = (text or ""):lower(), page = self.name, sec = sec }
+	UI.rows[#UI.rows + 1] = e
+	if sec then
+		sec.rows[#sec.rows + 1] = e
+		if sec.paint then sec.paint() end
+	end
 	return f
 end
 
--- small spaced-out caps caption ("APUNTADO" -> "A P U N T A D O")
+-- section header: accent tick + spaced caps + chevron. Click folds / unfolds the rows below it (remembered in cfg.fold)
 function TM.section(self, text)
 	self.n = (self.n or 0) + 1
+	local id = self.name .. "/" .. text
+	local sec = { id = id, folded = cfg.fold[id] == true, rows = {} }
+	self.cur = sec
 	local out = {}
 	for _, c in utf8.codes(text) do out[#out + 1] = utf8.char(c) end
-	local f = N("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 28),
+	local f = N("TextButton", { Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, LayoutOrder = self.n }, self.page)
+	local tickM = N("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 4, 0.5, 4), Size = UDim2.fromOffset(3, 12), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, f)
+	corner(tickM, 9999)
+	agrad(tickM, 90)
+	N("TextLabel", {
+		Position = UDim2.fromOffset(16, 4),
+		Size = UDim2.new(1, -130, 1, -4),
 		BackgroundTransparency = 1,
 		Text = table.concat(out, " "),
 		Font = Enum.Font.GothamBold,
 		TextSize = 11,
 		TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Bottom,
-		LayoutOrder = self.n,
-	}, self.page, { TextColor3 = "faint" })
-	N("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4) }, f)
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, f, { TextColor3 = "sub" })
+	local count = N("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -28, 0.5, 4),
+		Size = UDim2.fromOffset(96, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.RobotoMono,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, f, { TextColor3 = "faint" })
+	local chev = N("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -8, 0.5, 4),
+		Size = UDim2.fromOffset(14, 20),
+		BackgroundTransparency = 1,
+		Text = "›",
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		Rotation = sec.folded and 0 or 90,
+	}, f, { TextColor3 = "faint" })
+	function sec.paint() count.Text = sec.folded and (#sec.rows .. " opciones") or "" end
+	f.MouseButton1Click:Connect(function()
+		sec.folded = not sec.folded
+		cfg.fold[id] = sec.folded or nil
+		tw(chev, 0.25, { Rotation = sec.folded and 0 or 90 })
+		sec.paint()
+		UI.search(UI.searchBox.Text)
+		UI.sfx("click")
+		UI.changed()
+	end)
 	UI.rows[#UI.rows + 1] = { f = f, name = "", page = self.name, section = true }
 end
 
@@ -1356,8 +1573,23 @@ end
 function TM.toggle(self, text, key, opts)
 	opts = opts or {}
 	local withBind = opts.bind ~= false
-	local f = self:row(ROW, text)
-	lbl(f, text, withBind and 124 or 76)
+	local rp = withBind and 124 or 76
+	local f = self:row(opts.desc and 60 or ROW, text .. " " .. (opts.desc or ""))
+	local nameL = lbl(f, text, rp)
+	if opts.desc then -- name on top, one faint line under it
+		nameL.Position = UDim2.fromOffset(16, 9)
+		nameL.Size = UDim2.new(1, -(16 + rp), 0, 22)
+		N("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(16, 31),
+			Size = UDim2.new(1, -(16 + rp), 0, 18),
+			Text = opts.desc,
+			Font = Enum.Font.Gotham,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, f, { TextColor3 = "faint" })
+	end
 	local hit = N("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false }, f)
 	local sw = N("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -16, 0.5, 0), Size = UDim2.fromOffset(44, 24), BorderSizePixel = 0 }, f)
 	corner(sw, 9999)
@@ -1440,8 +1672,12 @@ function TM.slider(self, text, key, min, max, suffix, cb)
 	}, f, { TextColor3 = "accent" })
 	local track = N("Frame", { Position = UDim2.fromOffset(16, 44), Size = UDim2.new(1, -32, 0, 8), BorderSizePixel = 0 }, f, { BackgroundColor3 = "track" })
 	corner(track, 9999)
-	local fillBar = N("Frame", { Size = UDim2.fromScale(0, 1), BorderSizePixel = 0 }, track, { BackgroundColor3 = "accent" })
+	local fillBar = N("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, track)
 	corner(fillBar, 9999)
+	agrad(fillBar, 0)
+	local thumb = N("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(14, 14), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, fillBar)
+	corner(thumb, 9999)
+	N("UIStroke", { Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, thumb, { Color = "accent" })
 	local hitArea = N("Frame", { Position = UDim2.fromOffset(16, 32), Size = UDim2.new(1, -32, 0, 32), BackgroundTransparency = 1 }, f)
 
 	local nv = Instance.new("NumberValue") -- the shown number runs to the new value instead of jumping
@@ -1609,9 +1845,11 @@ function TM.color(self, text, key, cb)
 	paint()
 end
 
--- three preset swatches (single accent color for the whole menu); cfg[key] = { r, g, b }
+-- accent swatches (one accent color for the whole menu), 4 per row; cfg[key] = { r, g, b }
 function TM.presets(self, text, key, presets, cb)
-	local f = self:row(80, text)
+	local per = 4
+	local rows = math.ceil(#presets / per)
+	local f = self:row(52 + rows * 40, text)
 	N("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(16, 12),
@@ -1621,23 +1859,17 @@ function TM.presets(self, text, key, presets, cb)
 		TextSize = 14,
 		TextXAlignment = Enum.TextXAlignment.Left,
 	}, f, { TextColor3 = "sub" })
-	local holder = N("Frame", { Position = UDim2.fromOffset(16, 40), Size = UDim2.new(1, -32, 0, 32), BackgroundTransparency = 1 }, f)
-	N("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
-	local n = #presets
+	local holder = N("Frame", { Position = UDim2.fromOffset(16, 44), Size = UDim2.new(1, -32, 0, rows * 40 - 8), BackgroundTransparency = 1 }, f)
+	N("UIGridLayout", { CellSize = UDim2.new(1 / per, -(8 * (per - 1)) / per, 0, 32), CellPadding = UDim2.fromOffset(8, 8), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
 	local btns = {}
 	for i, p in ipairs(presets) do
-		local b = N("TextButton", {
-			Size = UDim2.new(1 / n, -(8 * (n - 1)) / n, 1, 0),
-			Text = "",
-			BorderSizePixel = 0,
-			AutoButtonColor = false,
-			LayoutOrder = i,
-		}, holder, { BackgroundColor3 = "chip" })
+		local b = N("TextButton", { Text = "", BorderSizePixel = 0, AutoButtonColor = false, LayoutOrder = i }, holder, { BackgroundColor3 = "chip" })
 		corner(b, 6)
 		local st = stroke(b, 1, "line")
-		local dot = N("Frame", { Position = UDim2.fromOffset(12, 10), Size = UDim2.fromOffset(12, 12), BorderSizePixel = 0, BackgroundColor3 = col(p[2]) }, b)
+		local dot = N("Frame", { Position = UDim2.fromOffset(10, 10), Size = UDim2.fromOffset(12, 12), BorderSizePixel = 0, BackgroundColor3 = Color3.new(1, 1, 1) }, b)
 		corner(dot, 9999)
-		local nm = N("TextLabel", { Position = UDim2.fromOffset(32, 0), Size = UDim2.new(1, -36, 1, 0), BackgroundTransparency = 1, Text = p[1], Font = Enum.Font.GothamMedium, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left }, b)
+		N("UIGradient", { Rotation = 45, Color = ColorSequence.new(col(p[2]), accentShift(p[2])) }, dot)
+		local nm = N("TextLabel", { Position = UDim2.fromOffset(30, 0), Size = UDim2.new(1, -34, 1, 0), BackgroundTransparency = 1, Text = p[1], Font = Enum.Font.GothamMedium, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, b)
 		UI.pressFX(b)
 		btns[i] = { st = st, nm = nm }
 		b.MouseButton1Click:Connect(function()
@@ -1654,6 +1886,7 @@ function TM.presets(self, text, key, presets, cb)
 		for i, p in ipairs(presets) do
 			local sel = (c[1] == p[2][1] and c[2] == p[2][2] and c[3] == p[2][3])
 			btns[i].st.Color = sel and T.accent or T.line
+			btns[i].st.Thickness = sel and 2 or 1
 			btns[i].nm.TextColor3 = sel and T.text or T.sub
 		end
 	end
@@ -1662,17 +1895,155 @@ function TM.presets(self, text, key, presets, cb)
 	paint()
 end
 
--- whole card is the button; click feedback shrinks it to 98%
-function TM.button(self, text, cb)
+-- full looks: background theme + accent in one click. list[i] = { name, theme, accent }
+function TM.styles(self, text, list)
+	local per = 3
+	local rows = math.ceil(#list / per)
+	local f = self:row(52 + rows * 72, text)
+	N("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(16, 12),
+		Size = UDim2.new(1, -32, 0, 20),
+		Text = text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, f, { TextColor3 = "sub" })
+	local holder = N("Frame", { Position = UDim2.fromOffset(16, 44), Size = UDim2.new(1, -32, 0, rows * 72 - 8), BackgroundTransparency = 1 }, f)
+	N("UIGridLayout", { CellSize = UDim2.new(1 / per, -(8 * (per - 1)) / per, 0, 64), CellPadding = UDim2.fromOffset(8, 8), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
+	local btns = {}
+	for i, st in ipairs(list) do
+		local th = THEMES[st[2]]
+		local b = N("TextButton", { Text = "", BorderSizePixel = 0, AutoButtonColor = false, LayoutOrder = i, BackgroundColor3 = th.bg }, holder)
+		corner(b, 8)
+		local sk = stroke(b, 1, "line")
+		local strip = N("Frame", { Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 22), BackgroundColor3 = th.card, BorderSizePixel = 0 }, b)
+		corner(strip, 5)
+		local bar = N("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 8, 0.5, 0), Size = UDim2.new(0.55, 0, 0, 6), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0 }, strip)
+		corner(bar, 9999)
+		N("UIGradient", { Color = ColorSequence.new(col(st[3]), accentShift(st[3])) }, bar)
+		local dot = N("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(10, 10), BackgroundColor3 = col(st[3]), BorderSizePixel = 0 }, strip)
+		corner(dot, 9999)
+		N("TextLabel", {
+			Position = UDim2.fromOffset(10, 38),
+			Size = UDim2.new(1, -20, 0, 18),
+			BackgroundTransparency = 1,
+			Text = st[1],
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			TextColor3 = th.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, b)
+		UI.pressFX(b)
+		btns[i] = sk
+		b.MouseButton1Click:Connect(function()
+			cfg.theme = st[2]
+			cfg.accent = deepcopy(st[3])
+			UI.retheme()
+			UI.sfx("click")
+			UI.notify("Estilo", st[1])
+		end)
+	end
+	local function paint()
+		for i, st in ipairs(list) do
+			local c = cfg.accent
+			local sel = cfg.theme == st[2] and c[1] == st[3][1] and c[2] == st[3][2] and c[3] == st[3][3]
+			btns[i].Color = sel and T.accent or T.line
+			btns[i].Thickness = sel and 2 or 1
+		end
+	end
+	UI.refreshers[#UI.refreshers + 1] = paint
+	UI.painters[#UI.painters + 1] = paint
+	paint()
+end
+
+-- quick modes: one click sets a group of options. list[i] = { name, short note, { cfgKey = value, ... } }.
+-- The chip whose values all match the current options is highlighted.
+function TM.modes(self, text, list)
+	local f = self:row(100, text)
+	N("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(16, 10),
+		Size = UDim2.new(1, -32, 0, 22),
+		Text = text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, f, { TextColor3 = "sub" })
+	local holder = N("Frame", { Position = UDim2.fromOffset(16, 38), Size = UDim2.new(1, -32, 0, 52), BackgroundTransparency = 1 }, f)
+	N("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, holder)
+	local n = #list
+	local chips = {}
+	for i, m in ipairs(list) do
+		local b = N("TextButton", { Size = UDim2.new(1 / n, -(8 * (n - 1)) / n, 1, 0), Text = "", BorderSizePixel = 0, AutoButtonColor = false, LayoutOrder = i }, holder, { BackgroundColor3 = "chip" })
+		corner(b, 8)
+		local sk = stroke(b, 1, "line")
+		local nm = N("TextLabel", { Position = UDim2.fromOffset(0, 8), Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = m[1], Font = Enum.Font.GothamBold, TextSize = 13 }, b, { TextColor3 = "sub" })
+		local nt = N("TextLabel", { Position = UDim2.fromOffset(4, 27), Size = UDim2.new(1, -8, 0, 16), BackgroundTransparency = 1, Text = m[2], Font = Enum.Font.Gotham, TextSize = 10, TextTruncate = Enum.TextTruncate.AtEnd }, b, { TextColor3 = "faint" })
+		local underline = N("Frame", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -3), Size = UDim2.new(0.5, 0, 0, 2), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, Visible = false }, b)
+		corner(underline, 9999)
+		agrad(underline, 0)
+		UI.pressFX(b)
+		chips[i] = { sk = sk, nm = nm, ul = underline }
+		b.MouseButton1Click:Connect(function()
+			for k, v in pairs(m[3]) do
+				if cfg[k] ~= nil then cfg[k] = deepcopy(v) end
+			end
+			S.rolls = {}
+			UI.refresh()
+			UI.changed()
+			UI.sfx("click")
+			UI.notify("Modo " .. m[1], "Aplicado")
+		end)
+	end
+	local function paint()
+		for i, m in ipairs(list) do
+			local on = true
+			for k, v in pairs(m[3]) do
+				if cfg[k] ~= v then on = false break end
+			end
+			chips[i].sk.Color = on and T.accent or T.line
+			chips[i].sk.Thickness = on and 2 or 1
+			chips[i].nm.TextColor3 = on and T.text or T.sub
+			chips[i].ul.Visible = on
+		end
+	end
+	UI.refreshers[#UI.refreshers + 1] = paint
+	UI.painters[#UI.painters + 1] = paint
+	UI.hooks[#UI.hooks + 1] = paint
+	paint()
+end
+
+-- status card: halo dot (accent when on, dim when off) + title + two detail lines; returns setter(title, line1, line2, on)
+function TM.statusCard(self, text)
+	local f = self:row(76, text)
+	local dot = N("Frame", { Position = UDim2.fromOffset(18, 19), Size = UDim2.fromOffset(10, 10), BorderSizePixel = 0 }, f)
+	corner(dot, 9999)
+	local halo = N("UIStroke", { Thickness = 4, Transparency = 0.8, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, dot)
+	local ttl = N("TextLabel", { Position = UDim2.fromOffset(40, 12), Size = UDim2.new(1, -56, 0, 22), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left }, f, { TextColor3 = "text" })
+	local l1 = N("TextLabel", { Position = UDim2.fromOffset(40, 36), Size = UDim2.new(1, -56, 0, 16), BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, f, { TextColor3 = "sub" })
+	local l2 = N("TextLabel", { Position = UDim2.fromOffset(40, 54), Size = UDim2.new(1, -56, 0, 16), BackgroundTransparency = 1, Font = Enum.Font.RobotoMono, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd }, f, { TextColor3 = "faint" })
+	return function(title, a, b, on)
+		ttl.Text, l1.Text, l2.Text = title or "", a or "", b or ""
+		local c = on and T.accent or T.faint
+		dot.BackgroundColor3, halo.Color = c, c
+	end
+end
+
+-- whole card is the button; click feedback shrinks it to 98%. kind: "primary" = accent text, "danger" = red text
+function TM.button(self, text, cb, kind)
 	local f = self:row(ROW, text)
+	local th = (kind ~= "danger") and { TextColor3 = (kind == "primary") and "accent" or "sub" } or nil
 	local b = N("TextButton", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
 		Text = text,
-		Font = Enum.Font.GothamMedium,
+		Font = (kind ~= nil) and Enum.Font.GothamBold or Enum.Font.GothamMedium,
 		TextSize = 14,
 		AutoButtonColor = false,
-	}, f, { TextColor3 = "sub" })
+		TextColor3 = (kind == "danger") and Color3.fromRGB(255, 108, 108) or nil,
+	}, f, th)
 	UI.pressFX(b, f)
 	b.MouseButton1Click:Connect(function()
 		UI.sfx("click")
@@ -1778,9 +2149,11 @@ function TM.credits(self)
 		Font = Enum.Font.GothamBold,
 		TextSize = 22,
 		TextColor3 = Color3.fromRGB(17, 19, 23),
+		BackgroundColor3 = Color3.new(1, 1, 1),
 		BorderSizePixel = 0,
-	}, f, { BackgroundColor3 = "accent" })
-	corner(mark, 8)
+	}, f)
+	corner(mark, 10)
+	agrad(mark, 135)
 	UI.creditLbl = N("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(76, 20),
@@ -1794,7 +2167,7 @@ function TM.credits(self)
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(76, 48),
 		Size = UDim2.new(1, -92, 0, 16),
-		Text = "Universal Hub  ·  v2.5 · build 118",
+		Text = "Universal Hub  ·  v2.8 · build 140",
 		Font = Enum.Font.RobotoMono,
 		TextSize = 11,
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -2690,6 +3063,12 @@ local function anyGun(char)
 	return false
 end
 
+local function descendantsOf(inst)
+	local ok, list = pcall(function() return inst:GetDescendants() end)
+	if ok and type(list) == "table" then return list end
+	return {}
+end
+
 function R.grab(force)
 	local now = tick()
 	if ST.giving or (not force and now < ST.lastGive) then return end
@@ -2701,8 +3080,8 @@ function R.grab(force)
 	local giver = items and items:FindFirstChild("giver")
 	local remotes = workspace:FindFirstChild("Remote")
 	local handler = remotes and remotes:FindFirstChild("ItemHandler")
-	if not (giver and handler) then
-		if force then notify("Armería", "No encuentro Prison_ITEMS.giver ni Remote.ItemHandler") end
+	if not giver or (not handler and cfg.rgGrabMode == "Remote") then
+		if force then notify("Armería", "No encuentro Prison_ITEMS.giver" .. (cfg.rgGrabMode == "Remote" and " ni Remote.ItemHandler" or "")) end
 		return
 	end
 	local want = {}
@@ -2720,17 +3099,29 @@ function R.grab(force)
 	ST.lastGive, ST.giving = now, true
 	task.spawn(function()
 		local home = hrp.CFrame
+		local mode = cfg.rgGrabMode
 		for _, w in ipairs(want) do
-			for _ = 1, 6 do
+			for attempt = 1, 6 do
 				if hasTool(w.name) or hum.Health <= 0 then break end
-				hrp.CFrame = w.pad.CFrame + Vector3.new(0, 3, 0)
+				local onPad = mode == "Touch" or mode == "Auto"
+				local byClick = mode == "Click" or mode == "Auto"
+				local byRemote = mode == "Remote" or (mode == "Auto" and attempt >= 3) -- the remote is the last resort in Auto
+				-- stand ON the pad so the game's own Touched fires; otherwise just above it
+				hrp.CFrame = onPad and w.pad.CFrame or (w.pad.CFrame + Vector3.new(0, 3, 0))
 				hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-				pcall(function() handler:InvokeServer(w.pad) end)
-				if type(fireclickdetector) == "function" then
-					local cd = w.pad:FindFirstChildOfClass("ClickDetector")
-					if cd then pcall(fireclickdetector, cd) end
+				if onPad and type(firetouchinterest) == "function" then
+					pcall(firetouchinterest, hrp, w.pad, 0)
+					pcall(firetouchinterest, hrp, w.pad, 1)
 				end
-				if not hasTool(w.name) then task.wait(0.2) end
+				if byClick then
+					for _, d in ipairs(descendantsOf(w.pad.Parent or w.pad)) do
+						local cn = d.ClassName
+						if cn == "ClickDetector" and type(fireclickdetector) == "function" then pcall(fireclickdetector, d) end
+						if cn == "ProximityPrompt" and type(fireproximityprompt) == "function" then pcall(fireproximityprompt, d) end
+					end
+				end
+				if byRemote then pcall(function() handler:InvokeServer(w.pad) end) end
+				if not hasTool(w.name) then task.wait(0.25) end
 			end
 		end
 		hrp.CFrame = home
@@ -3342,6 +3733,55 @@ function F.cfgList()
 end
 
 ----------------------------------------------------------------------
+-- panic: every function off, rage movement restored, menu hidden (key in Ajustes, default Delete)
+----------------------------------------------------------------------
+local PANIC_OFF = {
+	"aimbot", "silentAim", "trigger", "rgOn", "rgStrafe", "rgMelee", "rgAutoGuns",
+	"espBox", "espName", "espDist", "espHealth", "espTracer", "espSkeleton", "chams",
+	"speed", "jump", "fly", "noclip", "infjump",
+}
+
+function F.panic(keepOpen)
+	for _, k in ipairs(PANIC_OFF) do cfg[k] = false end
+	cfg.rgDesync, cfg.rgAntiAim = "Off", "Off"
+	S.aimHeld, S.lock, S.slock = false, nil, nil
+	pcall(F.rage.restore)
+	pcall(F.player)
+	pcall(F.noclip)
+	pcall(F.flyClean)
+	UI.refresh()
+	UI.changed()
+	if not keepOpen then UI.setOpen(false) end
+	UI.notify("Pánico", "Todo apagado")
+end
+
+----------------------------------------------------------------------
+-- rage quick modes: each one only sets the listed options
+----------------------------------------------------------------------
+local RAGE_MODES = {
+	{ "Legit", "Tecla · visibles", {
+		rgActivate = "Hold", rgWallMode = "Check", rgNoSpread = false, rgAutoShoot = false, rgRapid = false, rgMultiHit = false,
+		rgTargets = "Single", rgOrigin = "Real", rgFovOn = true, rgFov = 160, rgMaxDist = 400, rgPredict = 0,
+		rgStrafe = false, rgAntiAim = "Off", rgDesync = "Off", rgMelee = false,
+	} },
+	{ "Semi", "Tecla · rápido", {
+		rgActivate = "Hold", rgWallMode = "Check", rgNoSpread = true, rgAutoShoot = true, rgRapid = false, rgMultiHit = false,
+		rgTargets = "Single", rgOrigin = "Real", rgFovOn = true, rgFov = 350, rgMaxDist = 800, rgPredict = 0,
+		rgStrafe = false, rgAntiAim = "Off", rgDesync = "Off", rgMelee = false,
+	} },
+	{ "Rage", "Siempre · paredes", {
+		rgActivate = "Always", rgWallMode = "Wallbang", rgNoSpread = true, rgAutoShoot = true, rgRapid = true, rgRate = 20, rgMultiHit = false,
+		rgTargets = "Cycle", rgOrigin = "Real", rgFovOn = false, rgMaxDist = 2000,
+		rgStrafe = false, rgAntiAim = "Off", rgDesync = "Off", rgMelee = false,
+	} },
+	{ "Máximo", "Todo activado", {
+		rgActivate = "Always", rgWallMode = "Wallbang", rgNoSpread = true, rgAutoShoot = true, rgRapid = true, rgRate = 30, rgMultiHit = true,
+		rgTargets = "All", rgMaxTargets = 6, rgOrigin = "Spoof", rgFovOn = false, rgMaxDist = 3000,
+		rgStrafe = true, rgStrafeMode = "Orbit", rgAntiAim = "Spin", rgDesync = "Side", rgMelee = true,
+	} },
+}
+
+----------------------------------------------------------------------
 -- tabs (rail icons; Ajustes is created first so it sits at the very bottom)
 ----------------------------------------------------------------------
 local general = UI.addTab("General", "target", "Apuntado y chequeos")
@@ -3353,7 +3793,7 @@ local settings = UI.addTab("Ajustes", "tune", "Interfaz y configs", true)
 local about = UI.addTab("Info", "info", "Créditos y novedades", true)
 
 general:section("APUNTADO")
-general:toggle("Aimbot", "aimbot")
+general:toggle("Aimbot", "aimbot", { desc = "Apunta solo mientras mantienes la tecla" })
 general:keybind("Tecla de apuntado (mantener)", "aimBind")
 general:dropdown("Apuntar a", "aimPart", { { "Head", "Cabeza" }, { "Torso", "Torso" }, { "Random", "Aleatorio" } }, function() S.rolls = {} end)
 general:dropdown("Prioridad de objetivo", "priority", { { "Cursor", "Cursor" }, { "Distance", "Distancia" }, { "Health", "Vida" } })
@@ -3366,22 +3806,23 @@ general:toggle("Mostrar círculo FOV", "showFov")
 general:color("Color del círculo", "fovColor")
 general:section("CHEQUEOS")
 general:toggle("Team check", "teamCheck")
-general:toggle("Wall check (paredes)", "wallCheck")
+general:toggle("Wall check (paredes)", "wallCheck", { desc = "No apunta a quien está detrás de una pared" })
 general:toggle("Check de vivo", "aliveCheck")
 general:toggle("FF check (ForceField / protegidos)", "ffCheck")
 general:section("SILENT AIM")
-general:toggle("Silent aim", "silentAim")
+general:toggle("Silent aim", "silentAim", { desc = "Los disparos van al objetivo sin mover la cámara" })
 general:section("TRIGGERBOT")
-general:toggle("Triggerbot", "trigger")
+general:toggle("Triggerbot", "trigger", { desc = "Dispara cuando el cursor está sobre un enemigo" })
 general:slider("Delay del trigger", "triggerDelay", 0, 500, " ms")
 
-rage:section("RAGEBOT (PRISON LIFE)")
-rage:toggle("Ragebot", "rgOn")
+local rgStatus = rage:statusCard("estado del ragebot")
+rage:modes("Modo rápido", RAGE_MODES)
+rage:section("RAGEBOT")
+rage:toggle("Ragebot", "rgOn", { desc = "Dispara solo al mejor objetivo válido" })
 rage:dropdown("Activación", "rgActivate", { { "Always", "Siempre" }, { "Hold", "Mantener tecla" } })
 rage:keybind("Tecla (modo mantener)", "rgHold")
-local rgStatus = rage:info("...")
-local rgCats = rage:info("...")
-rage:button("Reiniciar contadores", function() F.rage.resetStats() end)
+rage:button("Reiniciar contadores de impactos", function() F.rage.resetStats() end)
+rage:button("Apagar todo (pánico)", function() F.panic(true) end, "danger")
 rage:section("JUGADOR ELEGIDO")
 rage:playerpick("Jugador del server", "rgPickId", function(id)
 	if id == 0 then
@@ -3392,40 +3833,42 @@ rage:playerpick("Jugador del server", "rgPickId", function(id)
 	UI.refresh()
 end)
 rage:dropdown("Modo de elección", "rgPickMode", { { "Auto", "Automático" }, { "First", "Prioridad" }, { "Only", "Solo elegido" } })
-rage:section("OBJETIVO")
-rage:dropdown("Hitbox", "rgHitbox", { { "Head", "Cabeza" }, { "Torso", "Torso" }, { "Legs", "Piernas" }, { "Random", "Aleatorio" } })
-rage:toggle("Probar otras partes si no se ve", "rgFallback")
-rage:dropdown("Prioridad", "rgPriority", { { "Distance", "Distancia" }, { "Health", "Vida" }, { "Cursor", "Cursor" } })
-rage:slider("Distancia máxima", "rgMaxDist", 50, 3000, " studs")
-rage:toggle("Limitar al FOV", "rgFovOn")
-rage:slider("Radio del FOV", "rgFov", 50, 800, " px")
-rage:dropdown("Equipos objetivo", "rgTeamFilter", { { "All", "Todos" }, { "Guards", "Guards" }, { "Inmates", "Inmates" }, { "Criminals", "Criminals" } })
-rage:toggle("Team check", "rgTeamCheck")
-rage:toggle("FF check (spawn protegido)", "rgFFCheck")
-rage:toggle("Ignorar amigos de Roblox", "rgFriends")
-rage:slider("Predicción de movimiento", "rgPredict", 0, 300, " ms")
 rage:section("DISPARO")
 rage:dropdown("Paredes", "rgWallMode", { { "Wallbang", "Wallbang (ignorar)" }, { "Check", "Wall check (visibles)" } })
-rage:toggle("Sin spread", "rgNoSpread")
-rage:toggle("Autoshoot", "rgAutoShoot")
+rage:toggle("Sin spread", "rgNoSpread", { desc = "Todas las balas van al mismo punto" })
+rage:toggle("Autoshoot", "rgAutoShoot", { desc = "Apagado: solo dispara mientras mantienes el click" })
 rage:dropdown("Origen del disparo", "rgOrigin", { { "Real", "Real (tu cabeza)" }, { "Spoof", "Pegado al objetivo" } })
 rage:slider("Distancia del origen falso", "rgSpoofDist", 1, 10, " studs")
 rage:dropdown("Objetivos por disparo", "rgTargets", { { "Single", "Uno" }, { "Cycle", "Rotar" }, { "All", "Todos" } })
 rage:slider("Máximo de objetivos", "rgMaxTargets", 2, 12)
-rage:toggle("Multi-hit (varios en un disparo)", "rgMultiHit")
+rage:toggle("Multi-hit", "rgMultiHit", { desc = "Varios objetivos dentro de un mismo disparo" })
+rage:section("OBJETIVO")
+rage:dropdown("Hitbox", "rgHitbox", { { "Head", "Cabeza" }, { "Torso", "Torso" }, { "Legs", "Piernas" }, { "Random", "Aleatorio" } })
+rage:toggle("Probar otras partes", "rgFallback", { desc = "Si la cabeza no se ve, apunta a otra parte" })
+rage:dropdown("Prioridad", "rgPriority", { { "Distance", "Distancia" }, { "Health", "Vida" }, { "Cursor", "Cursor" } })
+rage:slider("Distancia máxima", "rgMaxDist", 50, 3000, " studs")
+rage:toggle("Limitar al FOV", "rgFovOn", { desc = "Solo objetivos cerca de tu cursor" })
+rage:slider("Radio del FOV", "rgFov", 50, 800, " px")
+rage:dropdown("Equipos objetivo", "rgTeamFilter", { { "All", "Todos" }, { "Guards", "Guards" }, { "Inmates", "Inmates" }, { "Criminals", "Criminals" } })
+rage:toggle("Team check", "rgTeamCheck", { desc = "No dispara a tu propio equipo" })
+rage:toggle("FF check", "rgFFCheck", { desc = "Salta a jugadores con spawn protegido" })
+rage:toggle("Ignorar amigos de Roblox", "rgFriends", { desc = "No dispara a quienes tienes de amigos" })
+rage:slider("Predicción de movimiento", "rgPredict", 0, 300, " ms")
 rage:section("CADENCIA Y ARMA")
-rage:toggle("Rapid fire", "rgRapid")
+rage:toggle("Rapid fire", "rgRapid", { desc = "Dispara más rápido que el arma normal" })
 rage:slider("Disparos por segundo", "rgRate", 1, 60)
 rage:slider("Ráfaga por tick", "rgBurst", 1, 5)
-rage:toggle("Mods de arma (autofire, cadencia)", "rgGunMods")
-rage:toggle("Munición infinita", "rgInfAmmo")
-rage:toggle("Auto equipar", "rgAutoEquip")
+rage:toggle("Mods de arma", "rgGunMods", { desc = "Autofire y cadencia del arma en mano" })
+rage:toggle("Munición infinita", "rgInfAmmo", { desc = "Rellena la munición del arma equipada" })
+rage:toggle("Auto equipar", "rgAutoEquip", { desc = "Saca el arma de la mochila sola" })
 rage:dropdown("Arma", "rgGun", { { "Auto", "Automática" }, { "AK-47", "AK-47" }, { "Remington 870", "Remington 870" }, { "M9", "M9" } })
-rage:toggle("Auto armería (TP al pad)", "rgAutoGuns")
-rage:button("Pedir armas ahora (TP)", function() F.rage.grab(true) end)
+rage:section("ARMERÍA")
+rage:toggle("Auto armería", "rgAutoGuns", { desc = "Si no tienes arma, va por ella y regresa" })
+rage:dropdown("Método de armería", "rgGrabMode", { { "Auto", "Auto (tocar + click)" }, { "Touch", "Solo tocar el pad" }, { "Click", "Solo click" }, { "Remote", "Solo ItemHandler" } })
+rage:button("Pedir armas ahora (TP)", function() F.rage.grab(true) end, "primary")
 rage:button("Ver GunStates del arma", function() F.rage.dump() end)
 rage:section("MOVIMIENTO")
-rage:toggle("Strafe", "rgStrafe")
+rage:toggle("Strafe", "rgStrafe", { desc = "Te mueve alrededor del objetivo" })
 rage:dropdown("Tipo de strafe", "rgStrafeMode", { { "Orbit", "Órbita" }, { "Jitter", "Saltos al azar" }, { "Behind", "Detrás" } })
 rage:slider("Radio del strafe", "rgStrafeR", 3, 60, " studs")
 rage:slider("Velocidad de la órbita", "rgStrafeSpeed", 1, 20)
@@ -3436,14 +3879,20 @@ rage:section("DESYNC")
 rage:dropdown("Desync", "rgDesync", { { "Off", "Apagado" }, { "Side", "Lado" }, { "Random", "Al azar" }, { "Orbit", "Órbita" }, { "Vertical", "Vertical" } })
 rage:slider("Distancia del desync", "rgDesyncDist", 2, 40, " studs")
 rage:slider("Velocidad (órbita)", "rgDesyncSpeed", 1, 30)
-rage:toggle("Disparar desde la posición falsa", "rgDesyncOrigin")
+rage:toggle("Disparar desde la posición falsa", "rgDesyncOrigin", { desc = "El disparo sale de donde el server te ve" })
 rage:section("MELEE")
-rage:toggle("Melee aura", "rgMelee")
+rage:toggle("Melee aura", "rgMelee", { desc = "Golpea a quien esté a tu alcance" })
 rage:slider("Alcance melee", "rgMeleeRange", 3, 30, " studs")
 rage:slider("Golpes por tick", "rgMeleeHits", 1, 6)
 rage:section("AJUSTE AUTOMÁTICO")
 rage:button("Aprender disparo (dispara 1 vez a mano)", function() F.rage.learn() end)
 rage:button("Olvidar disparo aprendido", function() F.rage.forget() end)
+
+local function paintRage()
+	rgStatus(cfg.rgOn and "RAGEBOT ACTIVO" or "RAGEBOT APAGADO", F.rage.status(), F.rage.catStatus(), cfg.rgOn)
+end
+paintRage()
+UI.hooks[#UI.hooks + 1] = function() if UI.current == "Rage" then paintRage() end end
 
 visual:section("ESP")
 visual:toggle("Cajas", "espBox")
@@ -3473,15 +3922,32 @@ player:toggle("Salto infinito", "infjump")
 player:section("UTILIDAD")
 player:toggle("Anti-AFK", "antiafk")
 
+themes:section("ESTILOS")
+themes:styles("Estilos completos (fondo + color)", {
+	{ "Menta Pro", "Dark", { 108, 230, 200 } },
+	{ "Violeta Neón", "Obsidian", { 168, 126, 255 } },
+	{ "Carmesí", "Crimson", { 255, 84, 104 } },
+	{ "Océano", "Ocean", { 72, 190, 255 } },
+	{ "Oro", "Dark", { 255, 200, 87 } },
+	{ "Claro", "Light", { 64, 120, 255 } },
+})
 themes:section("ACENTO")
 themes:presets("Color de acento", "accent", {
 	{ "Menta", { 108, 230, 200 } },
 	{ "Durazno", { 255, 179, 138 } },
 	{ "Azul hielo", { 159, 216, 255 } },
+	{ "Violeta", { 168, 126, 255 } },
+	{ "Carmesí", { 255, 84, 104 } },
+	{ "Oro", { 255, 200, 87 } },
+	{ "Rosa", { 255, 130, 200 } },
+	{ "Lima", { 170, 235, 90 } },
 }, function() UI.applyTheme() end)
 themes:color("Color personalizado", "accent", function() UI.applyTheme() end)
 themes:section("FONDO")
-themes:dropdown("Tema", "theme", { { "Dark", "Oscuro" }, { "Light", "Claro" }, { "Midnight", "Medianoche" }, { "Custom", "Personalizado" } }, function() UI.retheme() end)
+themes:dropdown("Tema", "theme", {
+	{ "Dark", "Oscuro" }, { "Obsidian", "Obsidiana" }, { "Ocean", "Océano" }, { "Crimson", "Carmesí" },
+	{ "Midnight", "Medianoche" }, { "Light", "Claro" }, { "Custom", "Personalizado" },
+}, function() UI.retheme() end)
 themes:color("Fondo personalizado", "customBg", function()
 	if cfg.theme ~= "Custom" then
 		cfg.theme = "Custom"
@@ -3493,6 +3959,10 @@ end)
 settings:section("INTERFAZ")
 settings:keybind("Tecla del menú", "menuBind", function() UI.paintFooter() end)
 settings:slider("Transparencia del panel", "opacity", 0, 70, " %", function() UI.applyOpacity() end)
+settings:toggle("Marca de agua (HUD)", "hud", { bind = false, desc = "Nombre, FPS y ping arriba de la pantalla", cb = function() UI.hudStep() end })
+settings:toggle("Lista de funciones activas", "hudList", { bind = false, desc = "Se ve a la izquierda con el menú cerrado", cb = function() UI.hudStep() end })
+settings:keybind("Tecla de pánico", "panicBind")
+settings:button("Apagar todo (pánico)", function() F.panic(true) end, "danger")
 settings:toggle("Notificaciones", "notify", { bind = false })
 settings:toggle("Sonidos de interfaz", "sounds", { bind = false })
 settings:toggle("Recordar ajustes", "autosave", { bind = false, cb = function(v)
@@ -3540,6 +4010,15 @@ end)
 about:section("CRÉDITOS")
 about:credits()
 about:section("NOVEDADES")
+about:notes("Versión 2.8", {
+	"Menú nuevo: colores con degradado y 6 estilos de un click",
+	"Pestañas con nombre, secciones que se pliegan",
+	"Rage: modos rápidos Legit, Semi, Rage y Máximo",
+	"Rage: tarjeta de estado y descripciones en cada opción",
+	"HUD con FPS, ping y lista de funciones activas",
+	"Botón y tecla de pánico: apaga todo de golpe",
+	"Armería por TP: tocar, click o ItemHandler",
+})
 about:notes("Versión 2.7", {
 	"Rage: selector de jugador, desync y armería por TP",
 	"Rage: ragebot completo para Prison Life",
@@ -3547,7 +4026,6 @@ about:notes("Versión 2.7", {
 	"Avatar 3D girando y saludo según la hora",
 	"Atajos visibles junto a cada opción",
 	"Ajustes recordados entre sesiones",
-	"Acento a elegir: menta, durazno o azul hielo",
 	"FF check: no apunta a jugadores protegidos",
 })
 
@@ -3580,6 +4058,10 @@ on(UIS.InputBegan, function(input, gpe)
 	end
 	if bindMatches(cfg.menuBind, input) then
 		UI.setOpen(not UI.open)
+	end
+	if bindMatches(cfg.panicBind, input) then
+		F.panic()
+		return
 	end
 	if bindMatches(cfg.aimBind, input) then
 		S.aimHeld, S.rolls, S.lock = true, {}, nil
@@ -3664,11 +4146,9 @@ RunService:BindToRenderStep("UA_main", Enum.RenderPriority.Camera.Value + 1, fun
 		local fps = math.floor(S.fpsN / S.fpsAcc + 0.5)
 		local ping = UI.ping()
 		UI.liveLbl.Text = ping and string.format("%3d FPS  ·  %3d ms", fps, math.floor(ping + 0.5)) or string.format("%3d FPS", fps)
+		safe(UI.hudStep, fps, ping)
 		setStats(string.format("FPS: %d  |  Jugadores: %d", fps, #Players:GetPlayers()))
-		if UI.current == "Rage" then
-			rgStatus(F.rage.status())
-			rgCats(F.rage.catStatus())
-		end
+		if UI.current == "Rage" then paintRage() end
 		S.fpsAcc, S.fpsN = 0, 0
 	end
 	if S.infoAcc >= 1 then
@@ -3701,4 +4181,6 @@ if not cfg.streamer then UI.setOpen(true) end
 if not has.drawing then
 	UI.notify("Sin Drawing", "Cajas y líneas apagadas (chams sí)")
 end
+UI.notify("Universal Hub v2.8", bindName(cfg.menuBind) .. " menú  ·  " .. bindName(cfg.panicBind) .. " pánico")
+UI.hudStep(60, nil)
 print("[Universal Hub] listo | " .. bindName(cfg.menuBind) .. " = menú")
